@@ -16,6 +16,10 @@ as a numerical bug.
 import sys, numpy as np, torch, ctranslate2, transformers
 
 PROMPT = "Translate English to French: The house is wonderful."
+# Forced target: fixed natural language, never sentinels. Pretrained-only models emit
+# <extra_id_*> for this prompt, and sentinel spellings differ per tokenizer, which would
+# confound the comparison with a vocabulary issue instead of a numerical one.
+TARGET = "La maison est merveilleuse."
 ATOL_HIDDEN, RTOL_HIDDEN = 1e-4, 1e-3   # float32 CPU; judge ratio vs magnitude too
 ATOL_LOGITS = 1e-3
 GREEDY_STEPS = 20
@@ -61,9 +65,7 @@ def main():
     tr = ctranslate2.Translator(ct2_dir, device="cpu", compute_type="float32",
                                 inter_threads=1, intra_threads=1)
 
-    hf_greedy_ids = hf.generate(input_ids=ids, max_new_tokens=GREEDY_STEPS,
-                                num_beams=1, do_sample=False)[0].tolist()
-    tgt_ids = [i for i in hf_greedy_ids if i != start]
+    tgt_ids = tok(TARGET, return_tensors="pt").input_ids[0].tolist()
     tgt_tokens = tok.convert_ids_to_tokens(tgt_ids)
     print(f"       forced target: {tgt_tokens}")
 
@@ -86,8 +88,11 @@ def main():
     # ---- P4 -------------------------------------------------------------
     print("\n[P4] greedy decode")
     res = tr.translate_batch([tokens], beam_size=1, max_decoding_length=GREEDY_STEPS)
-    ct2_greedy = res[0].hypotheses[0]
-    hf_greedy = tok.convert_ids_to_tokens(tgt_ids)
+    ct2_greedy = [t for t in res[0].hypotheses[0] if t != tok.eos_token]
+    hf_greedy_ids = hf.generate(input_ids=ids, max_new_tokens=GREEDY_STEPS,
+                                num_beams=1, do_sample=False)[0].tolist()
+    hf_greedy = [t for t in tok.convert_ids_to_tokens(
+        [i for i in hf_greedy_ids if i != start]) if t != tok.eos_token]
     print(f"       HF  : {hf_greedy[:GREEDY_STEPS]}")
     print(f"       CT2 : {ct2_greedy[:GREEDY_STEPS]}")
     m = min(len(hf_greedy), len(ct2_greedy), GREEDY_STEPS)
