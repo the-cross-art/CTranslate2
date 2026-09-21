@@ -228,7 +228,24 @@ python plans/umt5/scripts/parity.py /tmp/umt5-small-local /tmp/ct2-umt5 | grep -
 
 ---
 
-## Step 7 — rebuilding the UMT5 test model (if `/tmp` was cleared)
+## Step 7a — a tiny UMT5 for fast iteration (recommended)
+
+`google/umt5-small` is 1.2 GB and takes minutes to convert, mostly because its vocabulary is
+256384 x 512. For iterating on code, build a structurally identical but tiny one:
+
+```bash
+python plans/umt5/scripts/make_tiny_umt5.py        # -> /tmp/umt5-tiny, ~11 MB
+ct2-transformers-converter --model /tmp/umt5-tiny --output_dir /tmp/ct2-tiny   # ~4 seconds
+python plans/umt5/scripts/read_model_bin.py /tmp/ct2-tiny relative_attention_bias
+```
+
+You get **6 distinct bias tables, 0 aliases** — the same UMT5 signature as the real model, so
+it exercises the converter and the C++ detection exactly the same way.
+
+Its weights are **random**. Structure is real; output quality is meaningless. Use it to check
+that code runs and that plumbing is correct; use the real model to judge accuracy.
+
+## Step 7b — rebuilding the real UMT5 test model (if `/tmp` was cleared)
 
 Stock `google/umt5-*` needs one patch: Google published those configs without a
 `model_type` key, so `AutoConfig` can't identify them.
