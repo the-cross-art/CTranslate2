@@ -296,3 +296,7 @@ Editing **Python** needs no rebuild. Editing **C++** needs both cmake commands.
 4. Step 6 — understand why the UMT5 fix matters.
 5. Then come back and we'll finish UMT5 (the unresolved score discrepancy, and the
    `model_type` fallback).
+
+New to C++? Read `03-CPP-FOR-PYTHON-DEVS.md` — it maps every Python habit (venv, pip,
+imports, PYTHONPATH) onto its C++ equivalent using this repo, and explains exactly why the
+`DYLD_LIBRARY_PATH` line in Step 0 is needed.
