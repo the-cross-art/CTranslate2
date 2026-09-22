@@ -91,6 +91,20 @@ CI is running the broken combination right now.
 4. Only then raise UMT5, referencing #1478 and leading with the no-regression evidence.
 
 Detail: `B-01-mt5-rescaling.md`, `B-02-vocabulary-duplicates.md`.
+**Ready-to-paste issue text: `ISSUE-DRAFT-B-01.md`, `ISSUE-DRAFT-B-02.md`.**
+
+### Version check — resolved 2026-09-22
+
+B-01's open question ("does this affect transformers 5.9.0, the version CI pins?") is
+**closed: yes.** Checked the upstream source at both tags:
+
+| file | v5.9.0 | v5.17.0 |
+|---|---|---|
+| `modeling_t5.py` | 1 rescale, guarded by `scale_decoder_outputs` | same |
+| `modeling_mt5.py` | **0 rescale sites** | **0 rescale sites** |
+| `modeling_umt5.py` | 1 rescale, guarded by `tie_word_embeddings` | same |
+
+So the bug is present on the pinned CI version too, and the issue can state that.
 
 > Both write-ups contain a proposed fix, but **neither is implemented**. That is deliberate —
 > reproduce first, decide the fix second. B-01 especially has a real open question
