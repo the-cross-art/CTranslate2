@@ -91,7 +91,12 @@ CI is running the broken combination right now.
 4. Only then raise UMT5, referencing #1478 and leading with the no-regression evidence.
 
 Detail: `B-01-mt5-rescaling.md`, `B-02-vocabulary-duplicates.md`.
-**Ready-to-paste issue text: `ISSUE-DRAFT-B-01.md`, `ISSUE-DRAFT-B-02.md`.**
+**Ready-to-paste issue text: `ISSUE-DRAFT-B-01.md`, `ISSUE-DRAFT-B-02.md`,
+`ISSUE-DRAFT-UMT5.md`.**
+
+For UMT5: open a **new** issue linking #1478 rather than commenting on it (closed
+2024-11-18, ~2 years stale). The draft's title directly answers the perf objection that
+closed it, and it is honest about the unresolved log-prob residual.
 
 ### Version check — resolved 2026-09-22
 
