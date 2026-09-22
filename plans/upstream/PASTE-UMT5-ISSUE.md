@@ -2,19 +2,15 @@ UMT5 support: per-layer relative attention bias without regressing T5/mT5
 
 ---
 
-### Context
-
-[#1478](https://github.com/OpenNMT/CTranslate2/issues/1478) requested UMT5 support and was closed without a fix. Its one comment identified the root cause correctly and proposed removing the `position_bias->empty()` guard in `dot_product_attention`, but noted:
+The request for UMT5 support in issue #1478 was closed without resolution. One remark accurately pinpointed the underlying issue and suggested eliminating the `position_bias->empty()` safeguard in `dot_product_attention`, yet observed:
 
 > However, this approach may lead to performance degradation in T5 and MT5 models.
 
-That objection is what stalled it — the fix would make every existing T5/mT5 model recompute the position bias in every layer to support one new architecture.
+That objection is what hindered progress — the modification would require every current T5/mT5 model to recalculate the position bias in each layer to accommodate a new architecture.
 
-This proposes an approach without that cost. I have it implemented and validated, and would like to confirm the design before opening a PR.
+This suggests a method devoid of that expense. I have executed and verified the implementation, and I wish to affirm the design prior to submitting a pull request.
 
-### The architecture difference
-
-T5 and mT5 keep one relative attention bias table, in layer 0, shared by all layers. UMT5 gives every layer its own. Measured on the checkpoints:
+The architectural distinction is that T5 and mT5 utilise a singular relative attention bias table in layer 0, which is uniformly shared across all levels. UMT5 allocates a distinct entity to each layer. Evaluated at the designated markers:
 
 | model | encoder tables | decoder tables |
 |---|---|---|
@@ -22,19 +18,17 @@ T5 and mT5 keep one relative attention bias table, in layer 0, shared by all lay
 | `google/mt5-small` | 1 | 1 |
 | `google/umt5-small` | 8, all pairwise distinct | 8, all pairwise distinct |
 
-### Two problems
+### A pair of issues
 
-**1. Converter.** `_MODEL_LOADERS` has no `UMT5Config` entry, so conversion fails with `No conversion is registered for the model configuration UMT5Config` — the error in #1478.
+**1. Converter.** The `_MODEL_LOADERS` lacks an entry for `UMT5Config`, resulting in a conversion failure with the message `No conversion is registered for the model configuration UMT5Config` — the mistake referenced in #1478.
 
-Registering `UMT5Config` against `T5Loader` is not sufficient, and fails silently: `T5Loader.set_stack` (`converters/transformers.py:1294-1302`) reads each layer's bias, then overwrites layers 1..N with layer 0's. For UMT5 that discards 14 of 16 real tables, converts without error, and produces fluent but incorrect output.
+Registering `UMT5Config` with `T5Loader` is inadequate and results in silent failure: `T5Loader.set_stack` (`converters/transformers.py:1294-1302`) accesses the bias of each layer and subsequently overwrites layers 1..N with layer 0's. For UMT5 this eliminates 14 out of 16 actual tables, processes without mistakes, and generates articulate yet erroneous results.
 
-**2. Runtime.** `TransformerEncoder::operator()` (`src/layers/transformer.cc:460`) and `TransformerDecoder::operator()` (`:731`) create one `position_bias` buffer per forward pass and thread it through every layer. `attention.cc:237` fills it only when empty, so layer 0's bias is used everywhere.
+**2. Execution.** `TransformerEncoder::operator()` (`src/layers/transformer.cc:460`) and `TransformerDecoder::operator()` (`:731`) generate a singular `position_bias` buffer for each forward pass and propagate it through all layers. `attention.cc:237` populates solely when devoid of content, so the bias of layer 0 is universally applied.
 
-### Proposed approach
+The pathway for each layer is already established — `attention.cc:233-235` reverts to a local buffer when the caller provides `nullptr`. It is simply never reached. Instead of deactivating the cache for all models, identify the regime of each model and provide `nullptr` solely for the per-layer scenario.
 
-The per-layer path already exists — `attention.cc:233-235` falls back to a local buffer when the caller passes `nullptr`. It is simply never reached. So rather than disabling the cache for all models, detect which regime a model is in and pass `nullptr` only for the per-layer case.
-
-Detection needs no new config flag and no format change. `_alias_variables` (`specs/model_spec.py:169-189`) already serializes byte-identical tensors as aliases, and `register_variable_alias` (`models/model.cc:279-283`) resolves an alias to the same `shared_ptr<StorageView>` — preserved across device copies by `Model::copy_to` (`model.cc:809-831`). Comparing resolved pointers therefore distinguishes the two cases:
+Detection requires neither a new configuration flag nor a modification in format. The function `_alias_variables` (`specs/model_spec.py:169-189`) serialises byte-identical tensors as aliases, while `register_variable_alias` (`models/model.cc:279-283`) links an alias to the identical `shared_ptr<StorageView>`, maintained throughout device transfers via `Model::copy_to` (`model.cc:809-831`). Evaluating resolved pointers so differentiates the two scenarios:
 
 ```cpp
 static bool has_shared_position_bias(const models::Model& model,
@@ -54,82 +48,80 @@ static bool has_shared_position_bias(const models::Model& model,
 }
 ```
 
-Confirmed on disk: `t5-small` stores 2 bias variables plus 10 aliases; `google/umt5-small` stores 16 variables and 0 aliases. Models with no relative attention bias take the early return and are untouched, as are models with fewer than two layers.
+Confirmed on disk: `t5-small` contains 2 bias variables and 10 aliases; `google/umt5-small` contains 16 variables and no aliases. Models devoid of relative attention bias achieve early returns and remain unaffected, as do models with less than two layers.
 
-I believe this is sound in every case: identical tables (aliased) make the cache valid by definition, distinct tables take the per-layer path, and a partially-aliased model still takes the per-layer path and computes each layer correctly. If the aliasing behaviour ever changed, T5 would fall back to the per-layer path — slower, but never incorrect.
+I contend that this holds true universally: identical tables (aliased) inherently validate the cache, disparate tables follow the per-layer trajectory, and a partially-aliased model also adheres to the per-layer path while accurately computing each layer. Should the aliasing behaviour alter, T5 would revert to the per-layer approach — less efficient, yet consistently accurate.
 
 ### No-regression evidence
 
-Since the performance objection is what closed #1478, this is the part I would most like reviewed:
+Given that the performance concern is what led to the closure of #1478, this is the aspect I would prefer to be evaluated:
 
-- **Detection:** `umt5-small` → `shared_position_bias=0` on both stacks; `t5-small` and `mt5-small` → `1` on both stacks. T5 and mT5 keep the shared buffer and the existing code path exactly.
-- **`t5-small` `model.bin` is byte-identical** (same sha256) before and after the converter change.
-- **C++ suite on macOS/CPU:** 197 ran, 196 passed, 1 skipped — identical to baseline.
-- **`t5-small` numerical parity vs Hugging Face: `max |diff| = 1.07e-06`**, unchanged.
+- **Identification:** `umt5-small` exhibits `shared_position_bias=0` across both stacks; whereas `t5-small` and `mt5-small` display `1` on both stacks. T5 and mT5 maintain the identical shared buffer and the current code pathway.
+- The `t5-small` `model.bin` remains byte-identical (same sha256) prior to and after the converter modification.
+- **C++ suite on macOS/CPU:** 197 executed, 196 succeeded, 1 omitted — consistent with baseline.
+- **`t5-small` numerical parity compared to Hugging Face: `max |diff| = 1.07e-06`**, remains constant.
 
 ### Does it work?
 
-Same model, same harness, only the runtime differs:
+Identical model, identical harness, but the runtime varies:
 
-| branch | greedy 20 tokens vs Hugging Face |
+| branch | greedy 20 tokens versus Hugging Face |
 |---|---|
 | converter fix only | diverges at token 1 |
 | + runtime fix | exact match, all 20 tokens |
 
-### Validation on a production checkpoint and on GPU
+### Validation at a production checkpoint and utilising GPU resources
 
-Beyond the small models, this was run on Linux + CUDA (NVIDIA L4) against a 2.9B-parameter UMT5 checkpoint (24 encoder + 24 decoder layers):
+In addition to the compact models, this was executed on Linux + CUDA (NVIDIA L4) utilising a 2.9B-parameter UMT5 checkpoint (24 encoder + 24 decoder layers):
 
-- Correct conversion: 32128/32128 vocabulary entries, 0 duplicates; per-layer bias tables matching the HF checkpoint exactly.
-- End-to-end: 139/140 prompts valid on a production benchmark at `float32`, replacing a prior 100%-failure path.
-- **C++ test suite on Linux + CUDA: 344/345 passed, 1 pre-existing skip, 0 failures** — including every suite exercising the changed code (Attention, Transformer, Model, Translator, LayerDevice, CPU and GPU). Two further tests crashed for environment reasons (`Conv1DGroupNoBiasQuantized` on CPU; `Conv1D/float16` hitting a cuBLASLt symbol issue); `git diff` confirms neither is touched by the two changed files, and excluding them the run is clean.
+- Accurate transformation: 32128/32128 vocabulary entries, no duplication; per-layer bias tables correspond precisely with the HF checkpoint.
+- Comprehensive: 139 out of 140 prompts are valid on a production benchmark at `float32`, superseding a previous path with a 100% failure rate.
+- **C++ test suite on Linux with CUDA: 344 out of 345 tests passed, 1 pre-existing skip, and 0 failures** — encompassing all suites that engage the modified code (Attention, Transformer, Model, Translator, LayerDevice, CPU, and GPU). Two further tests failed due to environmental factors (`Conv1DGroupNoBiasQuantized` on CPU; `Conv1D/float16` encountering a cuBLASLt symbol problem); `git diff` verifies that neither is affected by the two modified files, and excluding them results in a clean run.
 
-### A float16 caveat that this change does not cause
+### A float16 warning that this modification does not induce
 
-At `compute_type=float16` on GPU, the 2.9B checkpoint degenerates to `<unk>`. I traced it rather than assume, and it appears to be a pre-existing T5-family fp16 dynamic-range problem:
+With `compute_type=float16` on GPU, the 2.9B checkpoint deteriorates to `<unk>`. I investigated it instead of making assumptions, and there seems to be an existing issue related to the T5-family fp16 dynamic range.
 
-- Reproduces at every beam size including beam=1 under forced-synchronous CUDA, so it is not a race.
-- `t5-small` at fp16/GPU is correct, so it is not fp16 in general.
-- **`google/mt5-small`, which takes the old untouched shared-bias path, also hard-crashes at fp16/GPU — and reproduces identically on the stock unpatched CTranslate2 4.8.2 PyPI wheel.** That is the decisive control: the failure class predates and is independent of this change.
-- Temporary instrumentation in `attention.cc` showed bias values clean at every layer (no NaN/Inf, sane magnitudes), while attention output went from 0 NaN, to 992/8192 NaN at layer 4, to 100% NaN from layer 5 — progressive activation overflow, not a bias-computation bug.
-- `bfloat16` makes beam=1 exactly correct, but beam≥2 degenerates into repetition — a separate issue I have not explored.
+- It replicates at all beam sizes, including beam=1, under enforced synchronous CUDA, hence it is not a race condition.
+- The `t5-small` model operates correctly at fp16 on GPU, indicating that it is not universally fp16.
+- **The `google/mt5-small` model, which follows the original unaltered shared-bias route, similarly experiences a complete failure at fp16/GPU — and delivers the same results on the standard unmodified CTranslate2 4.8.2 PyPI package.** The failure class exists prior to and independently of this alteration, representing the critical control.
+- Provisional apparatus in `attention.cc` showed the bias values were consistently clean across all layers (no NaN/Inf, reasonable magnitudes), however the attention output transitioned from 0 NaN, to 992/8192 NaN at layer 4, and ultimately to 100% NaN from layer 5 — indicative of gradual activation overload, rather than a bias-computation error.
+- The `bfloat16` format makes beam=1 precisely accurate, although beam≥2 deteriorates into redundancy — a distinct matter I have not investigated.
 
-Suggest documenting `compute_type=float32` for large T5-family models on GPU. Happy to file the fp16 overflow separately if it is news to you.
+Recommend recording `compute_type=float32` for substantial T5-family models utilising GPU. Pleased to submit the fp16 overflow independently if this is unfamiliar to you.
 
-### One thing I have not resolved
+### One unresolved issue
 
-Greedy and beam output match Hugging Face exactly, but teacher-forced per-token log-probs for UMT5 still differ by up to 0.605 (mean 0.206), against a 1.07e-06 noise floor measured on `t5-small` with the same harness, in plain float32.
+Teacher-forced per-token log-probs for UMT5 can differ by as much as 0.605 (mean 0.206), despite greedy and beam outputs aligning perfectly with Hugging Face, against a noise floor of 1.07e-06 observed on `t5-small` using the same framework in plain float32. I am convinced that this variation is not attributable to the aforementioned change and have eliminated the obvious possibilities.
 
-I do not believe this is caused by the change above, and ruled out the obvious candidates:
+- A single-layer UMT5, with `shared_position_bias=1`, which corresponds to the original code path, exhibits a difference of 0.022.
+- The discrepancy persists when zeroing each bias table (0.025), indicating that it is not associated with bias.
+- The error remains constant in sequence length (0.148 at 2 tokens, 0.219 at 17), indicating it is not compounding via attention.
+- Not the activation function (CTranslate2's `gelu_tanh_func` aligns perfectly with HF's `NewGELUActivation`; altering to gated-ReLU yields no difference), nor `head_dim` (substituting `d_kv=64` for the standard `d_model/num_heads` = 512/6 = 85 produced no change), nor a scalar multiplier on the logits (no α is suitable).
 
-- A 1-layer UMT5 — where `shared_position_bias=1`, i.e. the original code path — still differs (0.022).
-- Zeroing every bias table still differs (0.025), so it is not bias-related at all.
-- The error is flat in sequence length (0.148 at 2 tokens, 0.219 at 17), so it is not accumulating through attention.
-- Not the activation (CTranslate2's `gelu_tanh_func` matches HF's `NewGELUActivation` exactly; swapping to gated-ReLU changes nothing), not `head_dim` (injecting `d_kv=64` instead of the default `d_model/num_heads` = 512/6 = 85 changed nothing), and not a scalar factor on the logits (no α fits).
+As `argmax` remains unchanged, the generation is accurate, with only the scores and sampling being influenced. If this is a recognised trait of the T5-family path, I would prefer to comprehend it prior to submitting a PR.
 
-Since `argmax` is unaffected, generation is correct and only scores/sampling are affected. If this is a known characteristic of the T5-family path I would rather understand it before opening a PR.
+### Also worth noting
 
-### Also worth knowing
+Stock `google/umt5-*` repositories provide a `config.json` that lacks a `model_type` key, resulting in `AutoConfig.from_pretrained` triggering an `Unrecognized model` error at `converters/transformers.py:107`, prior to the consultation of the loader registry. Merely registering the loader does not render Google's checkpoints convertible unless the key is added locally. I would gladly implement a fallback that operates based on the `architectures` entry in `config.json` — this would benefit all pre-4.31 repositories, not solely UMT5 — however, that is a distinct modification.
 
-Stock `google/umt5-*` repositories publish a `config.json` with no `model_type` key, so `AutoConfig.from_pretrained` raises `Unrecognized model` at `converters/transformers.py:107`, before the loader registry is consulted. Registering the loader alone therefore does not make Google's own checkpoints convertible without adding that key locally. I would be happy to add a fallback that dispatches on `config.json`'s `architectures` entry — it would help any pre-4.31 repository, not just UMT5 — but that is a separate change.
+### Enquiries
 
-### Questions
+1. Is the detection of pointer identity satisfactory, or would you want a specific specification attribute? A flag would require the converter to set it, while older models would default to shared. Neither necessitates an increase in `spec_revision` — and I would contend against such an action, since `TransformerSpec` is utilised by T5, NLLB, BART, Marian, M2M-100 and Pegasus, thus elevating it would render every freshly converted model from all these frameworks incompatible with current deployments.
+2. Do you have any observations regarding the aforementioned log-prob residual?
+3. Would you prefer the `model_type` fallback to be included in the same pull request or in a separate one?
 
-1. Is the pointer-identity detection acceptable, or would you prefer an explicit spec attribute? A flag would need the converter to set it and old models to default to shared. Neither requires a `spec_revision` bump — and I would argue against one, since `TransformerSpec` is shared by T5, NLLB, BART, Marian, M2M-100 and Pegasus, so bumping it would make every newly converted model of all of those unloadable on existing deployments.
-2. Any insight on the log-prob residual above?
-3. Would you want the `model_type` fallback in the same PR or separately?
-
-The implementation is done and validated as described; happy to open a PR on confirmation. The diff is ~99 lines across `converters/transformers.py`, `src/layers/transformer.cc` and `include/ctranslate2/layers/transformer.h`.
+The execution has been completed and verified as outlined; I am pleased to initiate a pull request upon confirmation. The difference comprises approximately 99 lines within `converters/transformers.py`, `src/layers/transformer.cc` and `include/ctranslate2/layers/transformer.h`.
 
 ### Environment
 
 ```
 CTranslate2 4.8.2 (master), transformers 5.17.0, torch 2.14.0, Python 3.12
 
-Development / parity  : macOS arm64, CPU float32 (Accelerate + Ruy, no OpenMP)
-Production validation : Linux + CUDA, NVIDIA L4, 2.9B-param UMT5 (24+24 layers)
+Development / parity   : macOS arm64, CPU float32 (Accelerate + Ruy, no OpenMP)
+Production verification: Linux + CUDA, NVIDIA L4, 2.9B-parameter UMT5 (24+24 layers)
 ```
 
 ### Disclosure
 
-I investigated and implemented this with AI assistance (Claude). I reproduced every number above myself, ran the test suites on both machines, and verified the source references before filing. I am responsible for the correctness and design of the change and happy to discuss any part of it.
+I examined and executed this with the aid of AI (Claude). I independently replicated each number mentioned, executed the test suites on both systems, and confirmed the source citations prior to submission. I am accountable for the accuracy and design of the modification and am eager to discuss any aspect of it.
