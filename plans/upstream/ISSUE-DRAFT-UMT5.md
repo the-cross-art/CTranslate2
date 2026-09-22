@@ -106,6 +106,43 @@ Falsification check — same model, same harness, only the runtime differs:
 | converter fix only | **diverges at token 1** |
 | + runtime fix | **exact match, all 20 tokens** |
 
+## Validation on a real checkpoint and on GPU
+
+Beyond the toy models, this was run against a production 2.9B-parameter UMT5 checkpoint
+(24 encoder + 24 decoder layers) on an NVIDIA L4:
+
+- **Conversion:** correct vocabulary (32128/32128, 0 duplicates), per-layer bias tables
+  matching the HF checkpoint exactly.
+- **End-to-end:** 139/140 prompts valid on a production benchmark at `float32`, replacing a
+  prior 100%-failure path. CPU `float32` greedy decode also coherent.
+- **C++ test suite on Linux + CUDA:** 344/345 passed, 1 pre-existing skip, 0 failed —
+  including every suite touching the changed code (Attention, Transformer, Model, Translator,
+  LayerDevice, CPU and GPU). Two further tests crashed for environment reasons
+  (`Conv1DGroupNoBiasQuantized` on CPU; `Conv1D/float16` hitting a cuBLASLt symbol issue);
+  `git diff` confirms neither is touched by the two changed files, and excluding them the
+  run is clean.
+
+### A float16 caveat that is NOT caused by this change
+
+At `compute_type=float16` on GPU, this 2.9B checkpoint degenerates to `<unk>`. I chased it
+down rather than assume, and it is a **pre-existing T5-family fp16 dynamic-range problem**:
+
+- Reproduces at every beam size including beam=1 under forced-synchronous CUDA, so it isn't a
+  race.
+- `t5-small` at fp16/GPU is perfectly correct — so it isn't fp16 generally.
+- **`google/mt5-small` — which takes the old, untouched shared-bias path — also hard-crashes
+  at fp16/GPU, and reproduces identically on the stock unpatched CTranslate2 4.8.2 PyPI
+  wheel.** That is the decisive control: the failure class predates and is independent of this
+  change.
+- Temporary instrumentation in `attention.cc` showed bias values clean at every layer (no
+  NaN/Inf, sane magnitudes); attention output goes 0 NaN → 992/8192 NaN at layer 4 → 100% NaN
+  from layer 5. Progressive activation overflow, not a bias-computation bug.
+- `bfloat16` (wider exponent) makes beam=1 exactly correct; beam≥2 degenerates into
+  repetition — a separate issue I haven't explored.
+
+I'd suggest documenting `compute_type=float32` for large T5-family models on GPU. Happy to
+file the fp16 overflow separately if it's news to you.
+
 ## One thing I have not resolved — would value your input
 
 Greedy/beam output matches Hugging Face exactly, but **teacher-forced per-token log-probs for
@@ -148,14 +185,17 @@ pre-4.31 repo, not just UMT5 — but that's a separate change.
 2. Any insight on the log-prob residual above?
 3. Would you want the `model_type` fallback in the same PR or separately?
 
-Happy to open a PR on confirmation. Diff is ~99 lines across
-`converters/transformers.py`, `src/layers/transformer.cc`, `include/ctranslate2/layers/transformer.h`.
+Happy to open a PR on confirmation — the implementation is done and validated as above.
+Diff is ~99 lines across `converters/transformers.py`, `src/layers/transformer.cc`,
+`include/ctranslate2/layers/transformer.h`.
 
 ## Environment
 
 ```
-CTranslate2 4.8.2 (master), transformers 5.17.0, torch 2.14.0
-Python 3.12, macOS arm64, CPU float32 (Accelerate + Ruy, no OpenMP)
+CTranslate2 4.8.2 (master), transformers 5.17.0, torch 2.14.0, Python 3.12
+
+Development/parity : macOS arm64, CPU float32 (Accelerate + Ruy, no OpenMP)
+Production validation: Linux + CUDA, NVIDIA L4, 2.9B-param UMT5 (24+24 layers)
 ```
 
 ---

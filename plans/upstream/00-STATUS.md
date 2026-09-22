@@ -98,6 +98,18 @@ For UMT5: open a **new** issue linking #1478 rather than commenting on it (close
 2024-11-18, ~2 years stale). The draft's title directly answers the perf objection that
 closed it, and it is honest about the unresolved log-prob residual.
 
+### GPU / production validation — 2026-09-22
+
+The fix was independently validated on Linux + CUDA (NVIDIA L4) against a 2.9B-param UMT5
+production checkpoint: correct conversion, 139/140 valid on a production benchmark at
+float32, and 344/345 C++ tests passing (1 pre-existing skip, 0 failures). A float16
+degeneration was root-caused to a **pre-existing** T5-family dynamic-range problem —
+reproduced on the stock unpatched 4.8.2 PyPI wheel with mt5-small, which takes the untouched
+shared-bias path. Details are folded into `ISSUE-DRAFT-UMT5.md`.
+
+Still open: the P2 log-prob residual (0.605 vs a 1e-6 floor), unrelated to any of the above.
+New and unexplored: bfloat16 beam≥2 degenerates into repetition while beam=1 is exact.
+
 ### Version check — resolved 2026-09-22
 
 B-01's open question ("does this affect transformers 5.9.0, the version CI pins?") is
